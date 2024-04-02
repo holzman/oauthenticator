@@ -7,6 +7,7 @@ Founded based on work by Kyle Kelley (@rgbkrk)
 import base64
 import json
 import os
+import time
 import uuid
 from urllib.parse import quote, urlencode, urlparse, urlunparse
 
@@ -834,6 +835,16 @@ class OAuthenticator(Authenticator):
             )
             return
 
+    def build_refresh_tokens_request_params(self, handler, refresh_token, data=None):
+        params = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+        }
+
+        return params
+
     def build_access_tokens_request_params(self, handler, data=None):
         """
         Builds the parameters that should be passed to the URL request
@@ -994,6 +1005,46 @@ class OAuthenticator(Authenticator):
             # store the whole user model in auth_state too
             self.user_auth_state_key: user_info,
         }
+
+    async def get_exp_from_token(self, token):
+        return jwt.decode(token, options=dict(verify_signature=False))['exp']
+
+    async def refresh_user(self, user, handler=None):
+        """
+        Refresh access tokens
+        """
+
+        try:
+            username = user.name
+            auth_state = await user.get_auth_state()
+            access_token = auth_state.get('access_token')
+            exp = await self.get_exp_from_token(access_token)
+            ttl = int(int(exp) - time.time())
+
+            if ttl > (self.auth_refresh_age * 2):
+                self.log.warning(
+                    f"Not refreshing token for {username} this cycle: token expires in {ttl}s and next refresh happens in {self.auth_refresh_age}s."
+                )
+                return True
+            refresh_token = auth_state.get('refresh_token')
+            if refresh_token:
+                refresh_token_params = self.build_refresh_tokens_request_params(
+                    handler, refresh_token
+                )
+                token_info = await self.get_token_info(handler, refresh_token_params)
+            # build the auth model to be read if authentication goes right
+            auth_model = {
+                "name": username,
+                "admin": True if username in self.admin_users else None,
+                "auth_state": self.build_auth_state_dict(
+                    token_info, self.user_auth_state_key
+                ),
+            }
+            return await self.update_auth_model(auth_model)
+        except Exception as e:
+            self.log.warning(f"Failed to refresh token for {username}. Error was {e}.")
+
+            return True
 
     async def update_auth_model(self, auth_model):
         """
