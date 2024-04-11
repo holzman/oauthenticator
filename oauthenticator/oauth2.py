@@ -23,7 +23,7 @@ from tornado.httputil import url_concat
 from tornado.log import app_log
 from traitlets import Any, Bool, Callable, Dict, List, Unicode, Union, default, validate
 
-
+import hashlib
 def guess_callback_uri(protocol, host, hub_server_url):
     return f'{protocol}://{host}{url_path_join(hub_server_url, "oauth_callback")}'
 
@@ -1014,6 +1014,9 @@ class OAuthenticator(Authenticator):
         Refresh access tokens
         """
 
+        def md5hash(x):
+            return hashlib.md5(x.encode('utf-8')).hexdigest()
+
         try:
             username = user.name
             auth_state = await user.get_auth_state()
@@ -1023,19 +1026,33 @@ class OAuthenticator(Authenticator):
 
             if ttl > (self.auth_refresh_age * 2):
                 self.log.warning(
-                    f"Not refreshing token for {username} this cycle: token expires in {ttl}s and next refresh happens in {self.auth_refresh_age}s."
+                    f"Refreshing token [{md5hash(access_token)}] for {username} even though it expires in {ttl}s"
+#                    f"Not refreshing token for {username} this cycle: token expires in {ttl}s and next refresh happens in {self.auth_refresh_age}s."
                 )
-                return True
+
+
+#                return True
             refresh_token = auth_state.get('refresh_token')
+
             if refresh_token:
+                self.log.info(f"Got refresh token for {username}")
+                self.log.info(f"Refresh {username}: at [{md5hash(access_token)}] rt [{md5hash(refresh_token)}]")
+
                 refresh_token_params = self.build_refresh_tokens_request_params(
                     handler, refresh_token
                 )
                 token_info = await self.get_token_info(handler, refresh_token_params)
+
+                access_token = token_info["access_token"]
+                exp = await self.get_exp_from_token(access_token)
+                ttl = int(int(exp) - time.time())
+                self.log.warning(
+                    f"Refresh: new access token [{md5hash(access_token)}] for {username} expires in {ttl}s")
+
             # build the auth model to be read if authentication goes right
             auth_model = {
                 "name": username,
-                "admin": True if username in self.admin_users else None,
+                "admin": None,
                 "auth_state": self.build_auth_state_dict(
                     token_info, self.user_auth_state_key
                 ),
@@ -1044,7 +1061,7 @@ class OAuthenticator(Authenticator):
         except Exception as e:
             self.log.warning(f"Failed to refresh token for {username}. Error was {e}.")
 
-            return True
+            return False
 
     async def update_auth_model(self, auth_model):
         """
